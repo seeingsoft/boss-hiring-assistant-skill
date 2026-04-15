@@ -82,6 +82,7 @@ Boss 招聘流程是长流程任务，不能只依赖龙虾通用记忆，所以
 - `attachment_receive_pending`
 - `attachment_received`
 - `wrong_candidate_thread_detected`
+- `paused_for_boss_contact_quota_exhausted`
 
 ## 来源相关判断建议
 
