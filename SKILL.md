@@ -136,7 +136,15 @@ BOSS 页面上的所有读取、点击、切换线程、打开详情、发送消
 
 - 小批量分轮发送
 - 相邻发送之间加入短暂停顿
+- 每发送 2 到 3 人做一次轻量状态校验
 - 触发验证码、异常验证、登录态波动、页面异常跳转时立即停止整轮发送
+
+如果首条打招呼发生在推荐页，还必须额外遵守：
+
+- 禁止用 XPath 或 DOM 序号点击“第 N 个按钮”
+- 必须先绑定稳定候选人标识，再点该候选人卡片内按钮
+- 必须按“一人一事务”执行，不要先识别一批人再回头批量点按钮
+- 优先在当前推荐页完成成功确认，不要每打一人就默认跳聊天页确认
 
 ### 2.1 默认不要把 Boss 浏览器控制下放给子代理
 
@@ -373,7 +381,9 @@ Boss 相关浏览器控制默认应由主执行流完成。
    - [boss-chat-service.md](./references/boss-chat-service.md)
    - [boss-scheduling-service.md](./references/boss-scheduling-service.md)
 3. 如需发 BOSS 站内消息，再读 [boss-send-recipe.md](./references/boss-send-recipe.md)
-4. 其他补充文档：
+4. 如需读取推荐页，再读 [boss-recommend-read-recipe.md](./references/boss-recommend-read-recipe.md)
+5. 如需发送首条打招呼，再读 [boss-greet-recipe.md](./references/boss-greet-recipe.md)
+6. 其他补充文档：
    - [policy-schema.md](./references/policy-schema.md)
    - [task-memory.md](./references/task-memory.md)
    - [trial-run.md](./references/trial-run.md)

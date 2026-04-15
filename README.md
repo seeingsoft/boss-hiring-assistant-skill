@@ -124,6 +124,12 @@
 - [references/boss-send-recipe.md](./references/boss-send-recipe.md)
   Boss 站内消息发送固定路径
 
+- [references/boss-recommend-read-recipe.md](./references/boss-recommend-read-recipe.md)
+  推荐页读取固定路径
+
+- [references/boss-greet-recipe.md](./references/boss-greet-recipe.md)
+  首条打招呼固定路径
+
 - [references/task-memory.md](./references/task-memory.md)
   本地任务记忆模型
 
