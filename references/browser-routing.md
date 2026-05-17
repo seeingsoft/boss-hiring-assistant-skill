@@ -190,3 +190,195 @@ Boss 任务中，优先级最高的浏览器规则是：
 - 发送标准消息
 
 这样可以减少子代理误开新 tab、误丢登录态、误切执行路径的风险。
+
+---
+
+## 截图调用前置门控
+
+截图禁令的文本规则已写明，但模型在 eval 失败时仍可能退化到截图路径。
+以下为结构性约束——必须按顺序完成所有前置动作，才能考虑截图：
+
+### eval 失败标准诊断流程（截图之前的唯一合法路径）
+
+当 eval 返回空结果或错误时，必须按以下顺序诊断，不可跳到截图：
+
+1. 检查 Content-Type 是否为 text/plain
+2. 检查 --data-raw 传参是否正确（不含 JSON 包裹）
+3. 检查 targetId 是否仍然有效（/targets 刷新）
+4. 检查 JS 表达式语法是否有错
+5. 检查目标 DOM 是否在 iframe 内（需穿透或导航到 iframe URL）
+6. 在同一路径补试最多 2 次
+
+只有以上 6 步全部走完且仍然失败，才允许按原有 5 条放行条件考虑截图。
+
+### eval 失败计数器（隐性规则）
+
+同一动作（如"读候选人卡片""读 JD"）如果连续 3 次 eval 返回无效结果：
+- 不继续尝试更多 eval 变体
+- 立即暂停并汇报用户
+- 告诉用户：已按标准诊断流程检查完毕，当前 eval 无法获取目标内容
+
+---
+
+## cdp-proxy /eval Boss 专用调用模板
+
+### 最小探针（每次新 targetId 或新会话的第一步）
+
+```bash
+curl -s -X POST "http://localhost:3456/eval?target={TARGET_ID}" \
+  -H "Content-Type: text/plain" \
+  --data-raw "1+1"
+```
+
+预期返回：`{"value":2}` 或 `{"value":"2"}`
+
+如果返回 `{"error":"..."}` 或 `attach failed`：
+- 不要继续执行任何业务 eval
+- 先检查：Content-Type、--data-raw、targetId
+
+### iframe 穿透读取模板
+
+当目标内容在 iframe 中时：
+
+```bash
+curl -s -X POST "http://localhost:3456/eval?target={TARGET_ID}" \
+  -H "Content-Type: text/plain" \
+  --data-raw "document.querySelector('iframe')?.contentDocument?.querySelector('.card-item')?.innerText || 'iframe_not_accessible'"
+```
+
+如果返回 `iframe_not_accessible`：
+- 优先方案：导航到 iframe 实际 URL（如 `/web/frame/recommend/`），在顶层页面操作
+- 不尝试更多 iframe 穿透变体
+
+---
+
+## navigate 后 eval 缓存陷阱
+
+CDP `/navigate` 后立即调用 `/eval` 可能返回旧页面内容。
+
+### 确认新内容已加载的标准流程
+
+1. `/navigate` 到目标 URL
+2. 调 `/info` 检查 `readyState` === `"complete"`
+3. 执行一次轻量 eval 检查页面标识（如 `document.title` 或 `location.href`）
+4. 确认返回内容与目标 URL 一致后，再执行业务 eval
+
+### 如果 eval 返回疑似旧内容
+
+- 检查返回内容中的 URL / title 是否匹配导航目标
+- 如果不匹配：等待 2 秒后重试一次
+- 如果仍返回旧内容：暂停并汇报，不要自行补全或假设
+
+---
+
+## DevToolsActivePort UUID 不匹配诊断
+
+如果 `/health` 返回 `connected=false` 或 CDP Proxy 无法连接 Chrome：
+
+1. 检查 Chrome 是否确实在运行且远程调试已启用
+2. 检查 Chrome DevToolsActivePort 文件：
+   - macOS: `~/.config/google-chrome/DevToolsActivePort` 或 Chrome 用户数据目录下
+   - Windows: `%USERPROFILE%\AppData\Local\Google\Chrome\User Data\DevToolsActivePort`
+3. 文件中的 WebSocket UUID 可能与 Chrome 实际会话不匹配
+4. 解决方案：重启 Chrome（先完全关闭再重新以调试模式启动），或清理 DevToolsActivePort 文件
+
+---
+
+## 中文编码问题与 Base64 读取模板
+
+### 问题描述
+
+web-access 的 `/eval` 端点返回包含中文字符的字符串时，可能出现乱码。
+例如预期返回 `"张阿梅 AI产品经理"`，实际返回 `" AI"`。
+
+**根因**：CDP Proxy (`cdp-proxy.mjs`) 在 `JSON.stringify()` 序列化时，中文字符的 UTF-16 编码在 HTTP 响应传输过程中损坏。
+这不是浏览器端问题，而是 Node.js HTTP 响应层的编码处理问题。
+
+**影响范围**：Mac 和 Windows 均受影响。纯 ASCII 内容（数字、英文）不受影响。
+
+### 何时必须使用 Base64 编码
+
+以下场景 **必须** 使用 Base64 编码读取：
+
+1. 读取候选人姓名、职位、公司等中文文本
+2. 读取聊天消息内容
+3. 读取 JD 文本
+4. 读取简历面板文本
+5. 读取任何包含中文的 `innerText` / `textContent`
+
+以下场景 **不需要** Base64 编码：
+
+1. 纯数字结果（如卡片数量 `12`）
+2. 纯英文/ASCII 文本
+3. CSS selector 查询（查询本身是 ASCII）
+4. 布尔值 / 简单状态判断
+
+### Base64 读取模板（标准版）
+
+```bash
+# Step 1: eval 中用 btoa+encodeURIComponent 编码中文，返回 Base64 字符串
+curl -s -X POST "http://localhost:3456/eval?target={TARGET_ID}" \
+  -H "Content-Type: text/plain" \
+  --data-raw "JSON.stringify({b64:btoa(unescape(encodeURIComponent(document.querySelector('.target-selector')?.innerText||''))),len:document.querySelector('.target-selector')?.innerText?.length||0})"
+
+# Step 2: 本地解码（Python）
+python3 -c "
+import json,base64,sys
+raw=json.loads(sys.stdin.read())
+if isinstance(raw.get('value'),str):
+  inner=json.loads(raw['value'])
+  if inner.get('b64'):
+    text=base64.b64decode(inner['b64']).decode('utf-8')
+    print(f'解码成功: {len(text)} 字符')
+    print(text)
+  else:
+    print('无 b64 字段')
+else:
+  print(f'异常响应: {raw}')
+" < /tmp/eval_result.json
+```
+
+### Base64 读取模板（单次提取多字段）
+
+当需要从一张候选人卡片中提取多个中文字段时：
+
+```bash
+curl -s -X POST "http://localhost:3456/eval?target={TARGET_ID}" \
+  -H "Content-Type: text/plain" \
+  --data-raw "(function(){var c=document.querySelector('.card-item');if(!c)return JSON.stringify({found:false});var name=c.querySelector('.name')?.innerText||'';var title=c.querySelector('.job-title')?.innerText||'';var exp=c.querySelector('.experience')?.innerText||'';return JSON.stringify({found:true,b64:btoa(unescape(encodeURIComponent(JSON.stringify({name:name,title:title,exp:exp}))))}})()"
+```
+
+本地解码后 `JSON.parse` 即可得到结构化对象。
+
+### Base64 读取模板（批量候选人列表）
+
+当需要从推荐页提取多张卡片信息时：
+
+```bash
+curl -s -X POST "http://localhost:3456/eval?target={TARGET_ID}" \
+  -H "Content-Type: text/plain" \
+  --data-raw "(function(){var cards=document.querySelectorAll('.card-item');var list=[];cards.forEach(function(c){list.push({name:c.querySelector('.name')?.innerText||'',title:c.querySelector('.job-title')?.innerText||''})});return JSON.stringify({count:list.length,b64:btoa(unescape(encodeURIComponent(JSON.stringify(list))))}})()"
+```
+
+### Base64 读取的 token 经济性
+
+- Base64 编码会使字符串长度增加约 33%
+- 对于大段文本（如完整简历），建议先在浏览器端做字段筛选，只编码必要字段
+- 不要对整页 `document.body.innerText` 做 Base64 编码，除非确实需要全部内容
+- 优先用 selector 精确提取目标元素，再对提取结果做 Base64
+
+### 编码问题诊断流程
+
+当 eval 返回的内容包含乱码或疑似乱码时：
+
+1. 检查返回值中是否出现 `` 或不可读字符
+2. 如果出现，判断是否为中文内容
+3. 如果是中文内容，切换到 Base64 编码模板重新读取
+4. 不要怀疑页面结构或 selector 有误——中文乱码是 CDP Proxy 已知编码问题
+5. 不要因为中文乱码而退回截图路径
+
+### 短字段快速判断规则
+
+- 如果返回值只包含 ASCII 字符且语义合理（如 `"12"`、`"active"`、`"true"`），无需 Base64
+- 如果返回值包含 `` 或非预期空格/截断，大概率是中文编码问题，立即切 Base64
+- 如果返回值与预期明显不符（如候选人姓名变成空字符串），先怀疑中文编码问题
