@@ -47,7 +47,8 @@
 
 1. eval 检查当前推荐页打招呼按钮是否带有 `overdue-tip-icon` class
 2. eval 检查是否存在权益/额度/沟通次数相关提示文案
-3. 如果发现 `overdue-tip-icon` 或明确权益耗尽信号：
+3. **重要（2026-05-19）**：`overdue-tip-icon` 在免费账户上可能是**常驻 UI 元素**，不必然代表额度耗尽。必须结合用户手动确认（用户能否正常打招呼）来判断
+4. 如果 **`overdue-tip-icon` 存在 + 用户手动点击也无反应 + 页面有明确权益耗尽文案**，才判定为真正耗尽：
    - 直接进入 `paused_for_boss_contact_quota_exhausted`
    - 不逐一尝试点击打招呼按钮
    - 汇报：当前权益已耗尽，建议明日恢复或开通更多权益
@@ -88,18 +89,50 @@
 
 推荐页卡片可能没有稳定唯一 ID，但卡片内部通常包含候选人姓名和打招呼按钮。
 
-这种情况下，不要退回 XPath、nth-child 或“第 N 个按钮”。
-必须使用“先按文本找到卡片，再给卡片内按钮临时打标”的方式。
+这种情况下，不要退回 XPath、nth-child 或"第 N 个按钮"。
+必须使用"先按文本找到卡片，再给卡片内按钮临时打标"的方式。
+
+**重要：BOSS 推荐页的卡片在 iframe 内**。`clickAt` 的 `document.querySelector` 只能搜主文档，无法直接命中 iframe 内的元素。
+
+**因此 marker 必须创建在主文档上**（定位到 iframe 内按钮的视口坐标），且必须设置 `pointer-events: none` 让鼠标事件穿透到 iframe。流程如下：
 
 固定步骤：
 
-1. 用 eval 在当前 DOM 中查找包含目标候选人姓名和必要上下文的卡片
+1. 用 eval 在当前 DOM 中查找包含目标候选人姓名和必要上下文的卡片（在 iframe 内）
 2. 在该卡片内部查找打招呼按钮
-3. 给该按钮写入临时属性，例如：
-   - `data-lobster-greet-target="candidate_name_or_hash"`
-4. 再用 CSS selector 调用 `web-access`：
-   - `[data-lobster-greet-target="candidate_name_or_hash"]`
-5. 点击完成后清理或覆盖该临时标记
+3. **计算按钮在视口（主文档）中的绝对坐标**：`rect.x + iframe.getBoundingClientRect().x`
+4. **在主文档 body 上创建 marker div**，定位到按钮坐标
+5. marker 必须设置 `pointer-events: none`（关键！让点击穿透到 iframe 内的按钮），`background: transparent`，无 id
+6. 给 marker 写入临时属性，例如 `data-lobster-greet-target="candidate_name_or_hash"`
+7. **在主文档中执行** `clickAt`，selector = 主文档 marker 的 selector——因为 CDP dispatchMouseEvent 按坐标派发，点击会穿透到 iframe
+8. 验证按钮是否变化（按钮消失/文案变为「继续沟通」）
+9. 清理 marker
+
+**marker 创建代码模板**：
+```js
+var iframe = document.querySelector(".frame-box iframe");
+var iframeRect = iframe.getBoundingClientRect();
+var doc = iframe.contentDocument;
+var cards = doc.querySelectorAll(".card-item");
+var targetCard = /* 按候选人姓名匹配 */;
+var btn = targetCard.querySelector(".btn-greet");
+// 必须：滚动 iframe 让按钮进入可视区（2026-05-19 教训：Lucky 按钮 y=1619 超出 902px 视口，点击落空）
+var btnRect = btn.getBoundingClientRect();
+if (btnRect.bottom > window.innerHeight || btnRect.top < iframeRect.top) {
+  doc.documentElement.scrollTop = doc.documentElement.scrollTop + btnRect.top - iframeRect.top - 100;
+}
+// 滚动后重新取坐标（滚动导致 getBoundingClientRect 变化）
+btnRect = btn.getBoundingClientRect();
+var marker = document.createElement("div");
+marker.setAttribute("data-lobster-greet-target", "UNIQUE_ID");
+marker.style.cssText = "position:fixed;left:"+(btnRect.left+iframeRect.left+btnRect.width/2)+"px;top:"+(btnRect.top+iframeRect.top+btnRect.height/2)+"px;width:2px;height:2px;z-index:99999;pointer-events:none;background:transparent";
+document.body.appendChild(marker);
+```
+
+**clickAt 调用**：
+```bash
+curl -s -X POST "http://localhost:3456/clickAt?target=TARGET_ID" -d '[data-lobster-greet-target="UNIQUE_ID"]'
+```
 
 这样做的目的：
 
@@ -135,17 +168,31 @@
 成功确认优先级固定为：
 
 1. 当前候选人卡片内按钮文案是否变化
-   - 例如从“立即沟通 / 打招呼”变成“继续沟通 / 已沟通”
+   - **精确目标**：从「打招呼」变为**「继续沟通」**（不含其他变体。不是「立即沟通」，不是「已沟通」，必须是「继续沟通」）
 2. 当前候选人卡片操作区是否变化
    - 例如按钮消失、按钮禁用、按钮样式变化、操作区被替换
 3. 当前候选人卡片主状态文案是否变化
-   - 例如新增“已联系”“已沟通”“继续沟通”
+   - 例如新增「已联系」「已沟通」「继续沟通」
 4. 页面是否出现短时成功提示
    - 例如 toast、轻提示、顶部提示条
 5. 当页或全局打招呼计数是否增加
 
-不要只因为“点击 API 返回成功”就当作发送成功。
-也不要只因为“全局计数增加”就确认目标候选人成功，必须优先看目标卡片自身状态。
+不要只因为「点击 API 返回成功」就当作发送成功。
+也不要只因为「全局计数增加」就确认目标候选人成功，必须优先看目标卡片自身状态。
+
+### 候选人全名规则（2026-05-19）
+
+在所有汇报、记录、验证日志中，候选人必须使用 `pageList` 中的**显示全名**（如「高天」「陈浩」）。
+禁止使用「高先生」「陈先生」等概称。
+
+### 页面刷新处理规则（2026-05-19）
+
+一旦检测到以下任一信号，**立即放弃当前候选人名单**，不尝试找回旧候选人：
+- `pageList` 内容或顺序发生变化
+- 原目标候选人从可视卡片中消失
+- 按钮文案异常（与预期不符）
+
+放弃后重新提取 `pageList`，进行新一轮 AI 评估和筛选。
 
 ## 权益耗尽优先诊断
 
